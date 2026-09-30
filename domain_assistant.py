@@ -244,26 +244,66 @@ class TextGenerator(Protocol):
 
 class OpenAIGenerator:
     def __init__(self, max_output_tokens: int = 300) -> None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "").strip()
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing from .env")
-        if not self.model:
-            raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+        if gemini_key and gemini_key != "your_openai_api_key_here":
+            self.api_key = gemini_key
+            self.model = os.getenv("GEMINI_MODEL", "").strip() or "gemini-1.5-flash"
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            self.is_gemini = True
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        elif openai_key and openai_key != "your_openai_api_key_here":
+            self.api_key = openai_key
+            self.model = os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o-mini"
+            self.base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
+            self.is_gemini = False
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.base_url else OpenAI(api_key=self.api_key)
+        else:
+            raise RuntimeError("GEMINI_API_KEY or OPENAI_API_KEY is missing from .env")
+
         self.max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            temperature=0,
-            max_output_tokens=self.max_output_tokens,
-        )
-        answer = response.output_text.strip()
-        if not answer:
-            raise RuntimeError("OpenAI returned an empty answer")
-        return answer
+        models_to_try = [self.model, "gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.1-flash-lite"] if self.is_gemini else [self.model]
+        last_error = None
+
+        for target_model in models_to_try:
+            for attempt in range(3):
+                try:
+                    if self.is_gemini or getattr(self, "base_url", None):
+                        response = self.client.chat.completions.create(
+                            model=target_model,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0,
+                            max_tokens=self.max_output_tokens,
+                        )
+                        answer = response.choices[0].message.content or ""
+                    else:
+                        try:
+                            response = self.client.responses.create(
+                                model=target_model,
+                                input=prompt,
+                                temperature=0,
+                                max_output_tokens=self.max_output_tokens,
+                            )
+                            answer = response.output_text.strip()
+                        except Exception:
+                            response = self.client.chat.completions.create(
+                                model=target_model,
+                                messages=[{"role": "user", "content": prompt}],
+                                temperature=0,
+                                max_tokens=self.max_output_tokens,
+                            )
+                            answer = response.choices[0].message.content or ""
+                    if answer.strip():
+                        return answer.strip()
+                except Exception as exc:
+                    last_error = exc
+                    time.sleep(1.5 * (attempt + 1))
+        if last_error:
+            raise last_error
+        raise RuntimeError("Generator returned an empty answer")
 
 
 @dataclass(frozen=True)
